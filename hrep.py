@@ -1,18 +1,44 @@
+#!/usr/bin/env python
 from __future__ import print_function
 import io
 import os
+import re
 import sys
 import argparse
 import binascii
 
-CHUNK_SIZE = 4*1024*1024
+BUFSIZE = 4*1024*1024
+TAILSIZE = BUFSIZE
+HEXDIGITS = "0123456789abcdef"
 
 try:
     range = xrange
 except NameError:
     pass
 
-def fblocks(fobj, start=0, length=None, chunksize=CHUNK_SIZE, tailsize=None):
+def hex_pattern(expr):
+    m =  re.match(r"^\s*((?:[0-9a-f?]{2}|\*|\s*)*)\s*$", expr, re.I)
+    if m:
+        # parse hex pattern
+        groups = re.findall(r"([0-9a-f?]{2}|\*)", m.group(1), re.I)
+        pat = []
+        for b in groups:
+            if b == "??":
+                pat.append('.')
+            elif b == "*":
+                pat.append(".*?")
+            elif '?' in b:
+                pat.append("[%s]" % "".join(r"\x%s" % b.replace('?', i).lower() for i in HEXDIGITS))
+            else:
+                pat.append(r"\x%s" % b.lower())
+        return re.compile(b''.join(pat), re.S)
+    else:
+        raise ValueError("Invalid hex pattern: `%s'" % expr)
+
+def verbatim_pattern(expr):
+    return re.compile(b''.join(r"\x%02x" % b for b in bytearray(expr)))
+
+def fblocks(fobj, start=0, length=None, chunksize=BUFSIZE, tailsize=None):
     if tailsize is None:
         tailsize = chunksize
     assert tailsize <= chunksize
@@ -47,8 +73,8 @@ def findall(haystack, needle):
 
 def multisearch(block, patterns):
     for i, p in enumerate(patterns):
-        for o in findall(block, p):
-            yield o, i
+        for m in p.finditer(block):
+            yield i, m
 
 def open_files(filenames):
     if len(filenames) == 0:
@@ -61,53 +87,58 @@ def open_files(filenames):
         except IOError as e:
             print("Error opening file: `%s`: %s" % (e.filename, e.strerror), file=sys.stderr)
 
-translate_tbl = bytearray([i if 32 <= i < 127 else ord('.') for i in range(256)])
-def marked_hexdump(data, offset, start, end, width, mark, unmark):
-    lines = []
-    marking = False
-    for i in range(0, len(data), width):
-        bs = ['{:02x}'.format(x) for x in bytearray(data[i:i + width])] + ['  '] * width
-        bs = bs[:width]
-        ss = list((data[i:i+width]).translate(translate_tbl).decode('ascii')) + [' '] * width
-        ss = ss[:width]
-        if i + width > start and i < end:
-            mark_end = min(end - i, width)
-            if mark_end < width:
-                bs[mark_end] = unmark + bs[mark_end]
-                ss[mark_end] = unmark + ss[mark_end]
+class HexDumper(object):
+    translate_tbl = bytearray([i if 32 <= i < 127 else ord('.') for i in range(256)])
 
-            mark_start = max(start - i, 0)
-            bs[mark_start] = mark + bs[mark_start]
-            ss[mark_start] = mark + ss[mark_start]
+    def __init__(self, width, align, before, after, mark, unmark):
+        self.width = width
+        self.align = align
+        self.mark = mark
+        self.unmark = unmark
+        self.before = before
+        self.after = after
+
+    def hexdump(self, data, offset, start, end):
+        lines = []
+        marking = False
+        width = self.width
+
+        dstart = (start / self.align) * self.align - self.before * width
+        dend = ((end + self.align - 1) / self.align) * self.align + self.after * width
+        dstart = max(0, dstart)
+
+        for i in range(dstart, dend, width):
+            bs = ['{:02x}'.format(x) for x in bytearray(data[i:i + width])] + ['  '] * width
+            bs = bs[:width]
+            ss = list((data[i:i+width]).translate(self.translate_tbl).decode('ascii')) + [' '] * width
+            ss = ss[:width]
+            addr_mark = ''
+            if i + width > start and i < end:
+                mark_end = min(end - i, width)
+                if mark_end < width:
+                    bs[mark_end] = self.unmark + bs[mark_end]
+                    ss[mark_end] = self.unmark + ss[mark_end]
+
+                mark_start = max(start - i, 0)
+                bs[mark_start] = self.mark + bs[mark_start]
+                ss[mark_start] = self.mark + ss[mark_start]
+                addr_mark = self.mark
 
 
-        dump = ' '.join(''.join(bs[j:j+2]) for j in range(0, width, 2))
-        ascii = ''.join(ss)
-        addr = offset + i
-        line_fmt = "0x{addr:06x}| {dump} {unmark}|{ascii}{unmark}|"
-        lines.append(line_fmt.format(**locals()))
-    return '\n'.join(lines)
+            dump = ' '.join(''.join(bs[j:j+2]) for j in range(0, width, 2))
+            ascii = ''.join(ss)
+            addr = offset + i
+            line_fmt = "{addr_mark}0x{addr:06x}{self.unmark}| {dump} {self.unmark}|{ascii}{self.unmark}|"
+            lines.append(line_fmt.format(**locals()))
+        return '\n'.join(lines)
 
-def print_match(filename, block, offset, match, pattern, args):
-    pathex = binascii.hexlify(pattern).decode("ascii")
-    start = offset + match
-    if args.decimal_offset:
-        print("{}:{}:{}".format(filename, start, pathex))
+def print_match(filename, block, offset, match, pattern, decimal):
+    match_hex = binascii.hexlify(block[match.start():match.end()])
+    start = offset + match.start()
+    if decimal:
+        print("{}:{}:{}".format(filename, start, match_hex))
     else:
-        print("{}:0x{:x}:{}".format(filename, start, pathex))
-
-    if not args.no_hexdump:
-        patlen = len(pattern)
-        dump_start = (match // args.dump_width) * args.dump_width
-        dump_end = ((match + patlen) \
-            // args.dump_width + 1) * args.dump_width
-        data = block[dump_start:dump_end]
-        match_start = match - dump_start
-        match_end = match_start + patlen
-        print(marked_hexdump(data, offset + dump_start, match_start, match_end, 
-            args.dump_width, args.mark, args.unmark), file=sys.stderr)
-        print(file=sys.stderr)
-
+        print("{}:0x{:x}:{}".format(filename, start, match_hex))
 
 def main():
     ap = argparse.ArgumentParser("hrep", 
@@ -115,12 +146,15 @@ def main():
         epilog="Each output line corresponds to a match in the format:\n\
         <filename>:<offset>:<match>")
     ap.add_argument("-x", "--hex", dest="hex", action="append", default=[],
-        help="Search for a binary string (hex-encoded)")
+        help="Search for a hexadecimal pattern"
+             "('?' matches a single nibble, '*' matches any number of bytes)")
     ap.add_argument("-a", "--ascii", dest="ascii", action="append", default=[],
         help="Search for an ASCII string")
-    ap.add_argument("--chunk-size",  default=CHUNK_SIZE,
-        help="Override default chunk size")
+    ap.add_argument("-e", "--regex", dest="regex", action="append", default=[],
+        help="Search for a regular expression")
 
+    ap.add_argument("--chunk-size",  default=BUFSIZE,
+        help="Override default buffer size")
     ap.add_argument("-d", "--decimal-offset", action="store_true",
         help="Output decimal file offsets (by default prints hex)")
     ap.add_argument("-X", "--no-hexdump", action="store_true",
@@ -131,6 +165,12 @@ def main():
         help="Width of hex dump")
     ap.add_argument("-s", "--summary", action="store_true",
         help="Print summary at the end")
+    ap.add_argument("-A", "--after", type=int, default=0,
+        help="Number of additional dump lines to display after match")
+    ap.add_argument("-B", "--before", type=int, default=0,
+        help="Number of additional dump lines to display before match")
+
+    ap.add_argument("--debug", action="store_true", help=argparse.SUPPRESS)
 
     ap.add_argument(dest="hex_a", metavar="HEX", 
         nargs="?", help="Hex encoded binary sequence to search for")
@@ -138,40 +178,54 @@ def main():
         help="List of files to search in")
     args = ap.parse_args()
 
-    if args.hex_a is not None:
-        if len(args.hex) + len(args.ascii) > 0:
+    if args.hex or args.ascii or args.regex:
+        if args.hex_a is not None:
             args.filename.insert(0, args.hex_a)
-        else:
+    else:
+        if args.hex_a is not None:
             args.hex.append(args.hex_a)
-    if len(args.hex) + len(args.ascii) == 0:
-        ap.error("No pattern specified")
+        else:
+            ap.error("No pattern specified")
 
     if args.no_colors or os.name == 'nt':
-        args.mark = args.unmark = ""
+        mark = unmark = ""
     else:
-        args.mark = "\033[31;1m"
-        args.unmark = "\033[0m"
-
-    patterns = [bytes(bytearray.fromhex(x)) for x in args.hex] + \
-               [x.encode("ascii") for x in args.ascii]
+        mark = "\033[31;1m"
+        unmark = "\033[0m"
+    try:
+        patterns = [hex_pattern(x) for x in args.hex] + \
+                   [verbatim_pattern(x.encode("ascii")) for x in args.ascii] + \
+                   [re.compile(x.encode("ascii")) for x in args.regex]
+    except ValueError as e:
+        ap.error(str(e))
+    if args.debug:
+        for p in patterns:
+            print(p.pattern)
     files = open_files(args.filename)
     matches = 0
     matched_files = set()
 
-    tailsize = min(args.chunk_size, min(len(x) for x in patterns))
+    dumper = HexDumper(args.dump_width, args.dump_width, args.before, args.after, mark, unmark)
 
     for f in files:
         fname = f.name
         if fname == 0:
             fname = '<stdin>'
-        for offset, block in fblocks(f, chunksize=args.chunk_size, tailsize=tailsize):
-            for match, i in sorted(multisearch(block, patterns)):
-                if match + len(patterns[i]) < tailsize:
-                    # Already matched this one
+        for offset, block in fblocks(f, chunksize=args.chunk_size, tailsize=args.chunk_size):
+            for i, m in sorted(multisearch(block, patterns)):
+                if args.debug:
+                    print('match {} at {}'.format(m, offset))
+
+                if m.end() > args.chunk_size:
+                    # Already matched this one (in the tail)
                     continue
                 matches += 1
                 matched_files.add(f)
-                print_match(fname, block, offset, match, patterns[i], args)
+                print_match(fname, block, offset, m, patterns[i], args.decimal_offset)
+
+                if not args.no_hexdump:
+                    print(dumper.hexdump(block, offset, m.start(), m.end()), file=sys.stderr)
+                    print(file=sys.stderr)
 
     if args.summary:
         print("{} match(es) accross {} file(s)".format(matches, len(matched_files)),
