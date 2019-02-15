@@ -17,26 +17,26 @@ except NameError:
     pass
 
 def hex_pattern(expr):
-    m =  re.match(r"^\s*((?:[0-9a-f?]{2}|\*|\s*)*)\s*$", expr, re.I)
+    m = re.match(br"^\s*((?:[0-9a-f?]{2}|\*|\s*)*)\s*$", expr, re.I)
     if m:
         # parse hex pattern
-        groups = re.findall(r"([0-9a-f?]{2}|\*)", m.group(1), re.I)
+        groups = re.findall(br"([0-9a-f?]{2}|\*)", m.group(1), re.I)
         pat = []
         for b in groups:
             if b == "??":
-                pat.append('.')
+                pat.append(b'.')
             elif b == "*":
-                pat.append(".*?")
+                pat.append(b".*?")
             elif '?' in b:
-                pat.append("[%s]" % "".join(r"\x%s" % b.replace('?', i).lower() for i in HEXDIGITS))
+                pat.append(b"[%s]" % "".join(br"\x%s" % b.replace('?', i).lower() for i in HEXDIGITS))
             else:
-                pat.append(r"\x%s" % b.lower())
+                pat.append(br"\x%s" % b.lower())
         return re.compile(b''.join(pat), re.S)
     else:
         raise ValueError("Invalid hex pattern: `%s'" % expr)
 
 def verbatim_pattern(expr):
-    return re.compile(b''.join(r"\x%02x" % b for b in bytearray(expr)))
+    return re.compile(b''.join(br"\x%02x" % b for b in bytearray(expr)))
 
 def fblocks(fobj, start=0, length=None, chunksize=BUFSIZE, tailsize=None):
     if tailsize is None:
@@ -74,7 +74,7 @@ def findall(haystack, needle):
 def multisearch(block, patterns):
     for i, p in enumerate(patterns):
         for m in p.finditer(block):
-            yield i, m
+            yield m
 
 def open_files(filenames):
     if len(filenames) == 0:
@@ -103,8 +103,8 @@ class HexDumper(object):
         marking = False
         width = self.width
 
-        dstart = (start / self.align) * self.align - self.before * width
-        dend = ((end + self.align - 1) / self.align) * self.align + self.after * width
+        dstart = (start // self.align) * self.align - self.before * width
+        dend = ((end + self.align - 1) // self.align) * self.align + self.after * width
         dstart = max(0, dstart)
 
         for i in range(dstart, dend, width):
@@ -132,8 +132,8 @@ class HexDumper(object):
             lines.append(line_fmt.format(**locals()))
         return '\n'.join(lines)
 
-def print_match(filename, block, offset, match, pattern, decimal):
-    match_hex = binascii.hexlify(block[match.start():match.end()])
+def print_match(filename, block, offset, match, decimal):
+    match_hex = binascii.hexlify(block[match.start():match.end()]).decode('ascii')
     start = offset + match.start()
     if decimal:
         print("{}:{}:{}".format(filename, start, match_hex))
@@ -159,7 +159,7 @@ def main():
         help="Output decimal file offsets (by default prints hex)")
     ap.add_argument("-X", "--no-hexdump", action="store_true",
         help="Disable hex dump")
-    ap.add_argument("-n", "--no-colors", action="store_true",
+    ap.add_argument("-C", "--no-colors", action="store_true",
         help="Don't use colors in dump output")
     ap.add_argument("-w", "--dump-width", type=int, default=16,
         help="Width of hex dump")
@@ -212,7 +212,7 @@ def main():
         if fname == 0:
             fname = '<stdin>'
         for offset, block in fblocks(f, chunksize=args.chunk_size, tailsize=args.chunk_size):
-            for i, m in sorted(multisearch(block, patterns)):
+            for m in sorted(multisearch(block, patterns), key=lambda m: m.start()):
                 if args.debug:
                     print('match {} at {}'.format(m, offset))
 
@@ -221,7 +221,7 @@ def main():
                     continue
                 matches += 1
                 matched_files.add(f)
-                print_match(fname, block, offset, m, patterns[i], args.decimal_offset)
+                print_match(fname, block, offset, m, args.decimal_offset)
 
                 if not args.no_hexdump:
                     print(dumper.hexdump(block, offset, m.start(), m.end()), file=sys.stderr)
