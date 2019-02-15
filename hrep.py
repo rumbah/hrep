@@ -62,15 +62,6 @@ def fblocks(fobj, start=0, length=None, chunksize=BUFSIZE, tailsize=None):
         tail[:] = head[-tailsize:]
         total += read
 
-
-def findall(haystack, needle):
-    i = -1
-    while True:
-        i = haystack.find(needle, i + 1)
-        if i == -1:
-            break
-        yield i
-
 def multisearch(block, patterns):
     for i, p in enumerate(patterns):
         for m in p.finditer(block):
@@ -125,7 +116,10 @@ class HexDumper(object):
                 addr_mark = self.mark
 
 
-            dump = ' '.join(''.join(bs[j:j+2]) for j in range(0, width, 2))
+            dump = [''.join(bs[j:j+2]) for j in range(0, len(bs), 2)]
+            dump = [' '.join(dump[j:j+4]) for j in range(0, len(dump), 4)]
+            dump = '  '.join(dump)
+
             ascii = ''.join(ss)
             addr = offset + i
             line_fmt = "{addr_mark}0x{addr:06x}{self.unmark}| {dump} {self.unmark}|{ascii}{self.unmark}|"
@@ -216,7 +210,7 @@ def main():
                 if args.debug:
                     print('match {} at {}'.format(m, offset))
 
-                if m.end() > args.chunk_size:
+                if m.start() > args.chunk_size:
                     # Already matched this one (in the tail)
                     continue
                 matches += 1
